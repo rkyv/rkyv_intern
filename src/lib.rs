@@ -182,7 +182,7 @@ impl<S: Serializer, T: Fallible> Serializer for InternSerializerAdapter<S, T> {
 
 impl<S: SharedSerializeRegistry, T: Fallible> SharedSerializeRegistry for InternSerializerAdapter<S, T> {
     #[inline]
-    fn get_shared_ptr(&mut self, value: *const u8) -> Option<usize> {
+    fn get_shared_ptr(&self, value: *const u8) -> Option<usize> {
         self.serializer.get_shared_ptr(value)
     }
 
