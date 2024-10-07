@@ -1,27 +1,26 @@
 use crate::{ArchivedInternedString, Intern, InternSerializeRegistry, InternedStringResolver};
-use rkyv::{
-    ser::Serializer,
-    with::{ArchiveWith, DeserializeWith, SerializeWith},
-    Fallible,
-};
 #[cfg(not(feature = "std"))]
-use ::alloc::string::String;
+use alloc_::string::String;
+use rkyv::{
+    rancor::Fallible,
+    ser::Writer,
+    with::{ArchiveWith, DeserializeWith, SerializeWith},
+    Place,
+};
 
 impl ArchiveWith<String> for Intern {
     type Archived = ArchivedInternedString;
     type Resolver = InternedStringResolver;
 
-    unsafe fn resolve_with(
-        field: &String,
-        pos: usize,
-        resolver: Self::Resolver,
-        out: *mut Self::Archived,
-    ) {
-        ArchivedInternedString::resolve_from_str(field.as_str(), pos, resolver, out);
+    fn resolve_with(field: &String, resolver: Self::Resolver, out: Place<Self::Archived>) {
+        ArchivedInternedString::resolve_from_str(field.as_str(), resolver, out);
     }
 }
 
-impl<S: InternSerializeRegistry<String> + Serializer + ?Sized> SerializeWith<String, S> for Intern {
+impl<S> SerializeWith<String, S> for Intern
+where
+    S: Fallible + InternSerializeRegistry<String> + Writer + ?Sized,
+{
     fn serialize_with(field: &String, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
         ArchivedInternedString::serialize_from_str(field.as_str(), serializer)
     }
@@ -29,7 +28,7 @@ impl<S: InternSerializeRegistry<String> + Serializer + ?Sized> SerializeWith<Str
 
 impl<D: Fallible + ?Sized> DeserializeWith<ArchivedInternedString, String, D> for Intern {
     fn deserialize_with(field: &ArchivedInternedString, _: &mut D) -> Result<String, D::Error> {
-        Ok(field.as_str().to_string())
+        Ok(String::from(field.as_str()))
     }
 }
 

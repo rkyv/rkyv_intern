@@ -7,9 +7,10 @@ edition = "2018"
 
 [dependencies]
 hashbrown = { version = "0.11", optional = true }
-rkyv = "0.7"
+rkyv = "0.8"
 
 [features]
-default = ["std"]
+default = ["bytecheck", "std"]
 alloc = ["hashbrown"]
 std = ["alloc"]
+bytecheck = ["rkyv/bytecheck"]

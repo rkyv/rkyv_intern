@@ -1,9 +1,9 @@
 use crate::{Intern, InternSerializeRegistry};
 use rkyv::{
     option::ArchivedOption,
-    ser::Serializer,
+    rancor::Fallible,
     with::{ArchiveWith, DeserializeWith, SerializeWith, With},
-    Archive, Deserialize, Fallible, Serialize,
+    Archive, Place, Serialize,
 };
 
 impl<T> ArchiveWith<Option<T>> for Intern
@@ -13,21 +13,16 @@ where
     type Archived = ArchivedOption<<Intern as ArchiveWith<T>>::Archived>;
     type Resolver = Option<<Intern as ArchiveWith<T>>::Resolver>;
 
-    unsafe fn resolve_with(
-        field: &Option<T>,
-        pos: usize,
-        resolver: Self::Resolver,
-        out: *mut Self::Archived,
-    ) {
+    fn resolve_with(field: &Option<T>, resolver: Self::Resolver, out: Place<Self::Archived>) {
         // SAFETY: With is repr(transparent) so Option<With<T, W>> has the same layout as Option<T>
-        let field = &*(field as *const Option<T> as *const Option<With<T, Intern>>);
-        field.resolve(pos, resolver, out.cast());
+        let field = unsafe { &*(field as *const Option<T> as *const Option<With<T, Intern>>) };
+        field.resolve(resolver, unsafe { out.cast_unchecked() });
     }
 }
 
 impl<T, S> SerializeWith<Option<T>, S> for Intern
 where
-    S: InternSerializeRegistry<T> + Serializer + ?Sized,
+    S: Fallible + InternSerializeRegistry<T> + ?Sized,
     Intern: ArchiveWith<T>,
     Intern: SerializeWith<T, S>,
 {
@@ -45,16 +40,15 @@ impl<T, D> DeserializeWith<ArchivedOption<<Intern as ArchiveWith<T>>::Archived>,
     for Intern
 where
     D: Fallible + ?Sized,
-    Intern: ArchiveWith<T>,
-    Intern: DeserializeWith<<Intern as ArchiveWith<T>>::Archived, T, D>,
+    Intern: ArchiveWith<T> + DeserializeWith<<Intern as ArchiveWith<T>>::Archived, T, D>,
 {
     fn deserialize_with(
         field: &ArchivedOption<<Intern as ArchiveWith<T>>::Archived>,
         deserializer: &mut D,
     ) -> Result<Option<T>, D::Error> {
-        Ok(
-            Deserialize::<Option<With<T, Intern>>, D>::deserialize(field, deserializer)?
-                .map(|x| x.into_inner()),
-        )
+        field
+            .as_ref()
+            .map(|x| Intern::deserialize_with(x, deserializer))
+            .transpose()
     }
 }

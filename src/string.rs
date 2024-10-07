@@ -1,17 +1,17 @@
-use crate::InternSerializeRegistry;
+#[cfg(all(feature = "alloc", not(feature = "std")))]
+use alloc_::string::String;
 use core::{
     borrow::Borrow,
     cmp, fmt, hash,
     ops::{Deref, Index, Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive},
-    pin::Pin,
 };
 use rkyv::{
-    ser::Serializer,
+    munge::munge,
     string::{
         repr::{ArchivedStringRepr, INLINE_CAPACITY},
         ArchivedString,
     },
-    SerializeUnsized,
+    Place, Portable,
 };
 
 /// An interned archived string.
@@ -19,6 +19,12 @@ use rkyv::{
 /// Because the memory for this string may be shared with other structures, it cannot be accessed
 /// mutably.
 #[repr(transparent)]
+#[cfg_attr(
+    feature = "bytecheck",
+    derive(rkyv::bytecheck::CheckBytes),
+    bytecheck(verify, crate = rkyv::bytecheck)
+)]
+#[derive(Portable)]
 pub struct ArchivedInternedString(ArchivedStringRepr);
 
 impl ArchivedInternedString {
@@ -28,40 +34,31 @@ impl ArchivedInternedString {
         self.0.as_str()
     }
 
-    /// Extracts a pinned mutable string slice containing the entire `ArchivedString`.
-    #[inline]
-    pub fn pin_mut_str(self: Pin<&mut Self>) -> Pin<&mut str> {
-        unsafe { self.map_unchecked_mut(|s| s.0.as_mut_str()) }
-    }
-
     /// Resolves an interned archived string from a given `str`.
-    ///
-    /// # Safety
-    ///
-    /// - `pos` must be the position of `out` within the archive
-    /// - `resolver` msut be the result of serializing `value`
     #[inline]
-    pub unsafe fn resolve_from_str(
-        value: &str,
-        pos: usize,
-        resolver: InternedStringResolver,
-        out: *mut Self,
-    ) {
+    pub fn resolve_from_str(value: &str, resolver: InternedStringResolver, out: Place<Self>) {
+        munge!(let Self(repr) = out);
         if value.len() <= INLINE_CAPACITY {
-            ArchivedStringRepr::emplace_inline(value, out.cast());
+            unsafe {
+                ArchivedStringRepr::emplace_inline(value, repr.ptr());
+            }
         } else {
-            ArchivedStringRepr::emplace_out_of_line(value, pos, resolver.pos, out.cast());
+            unsafe {
+                ArchivedStringRepr::emplace_out_of_line(value, resolver.pos, repr);
+            }
         }
     }
 
     /// Serializes an interned archived string from a given `str`.
+    #[cfg(feature = "alloc")]
     #[inline]
-    pub fn serialize_from_str<S: InternSerializeRegistry<String> + Serializer + ?Sized>(
+    pub fn serialize_from_str<S>(
         value: &str,
         serializer: &mut S,
     ) -> Result<InternedStringResolver, S::Error>
     where
-        str: SerializeUnsized<S>,
+        S: crate::InternSerializeRegistry<String> + rkyv::rancor::Fallible + ?Sized,
+        str: rkyv::SerializeUnsized<S>,
     {
         if value.len() <= INLINE_CAPACITY {
             Ok(InternedStringResolver { pos: 0 })
@@ -155,7 +152,7 @@ impl PartialEq for ArchivedInternedString {
 impl PartialOrd for ArchivedInternedString {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        self.as_str().partial_cmp(other.as_str())
+        Some(self.cmp(other))
     }
 }
 
@@ -198,63 +195,50 @@ pub struct InternedStringResolver {
     pos: usize,
 }
 
-#[cfg(feature = "validation")]
+#[cfg(feature = "bytecheck")]
 const _: () = {
-    use crate::validation::{
-        owned::{CheckOwnedPointerError, OwnedPointerError},
-        ArchiveContext, SharedContext,
-    };
-    use bytecheck::{CheckBytes, Error};
     use core::any::TypeId;
 
-    impl<C: ArchiveContext + SharedContext + ?Sized> CheckBytes<C> for ArchivedInternedString
+    use rkyv::{
+        bytecheck::{CheckBytes, Verify},
+        rancor::{Fallible, Source},
+        validation::{shared::ValidationState, ArchiveContext, ArchiveContextExt, SharedContext},
+    };
+
+    unsafe impl<C> Verify<C> for ArchivedInternedString
     where
-        C::Error: Error,
+        C: Fallible + ArchiveContext + SharedContext + ?Sized,
+        C::Error: Source,
     {
-        type Error = CheckOwnedPointerError<str, C>;
-
-        unsafe fn check_bytes<'a>(
-            value: *const Self,
-            context: &mut C,
-        ) -> Result<&'a Self, Self::Error> {
-            // The repr is always valid
-            let repr = &*value.cast::<ArchivedStringRepr>();
-
-            if repr.is_inline() {
-                // Inline interned strings are always owned
-                str::check_bytes(repr.as_str_ptr(), context)
-                    .map_err(OwnedPointerError::ValueCheckBytesError)?;
+        fn verify(&self, context: &mut C) -> Result<(), C::Error> {
+            if self.0.is_inline() {
+                unsafe {
+                    str::check_bytes(self.0.as_str_ptr(), context)?;
+                }
             } else {
-                // Out-of-line interned strings are shared
-                let base = value.cast();
-                let offset = repr.out_of_line_offset();
-                let metadata = repr.len();
-
-                let ptr = context
-                    .check_ptr::<str>(base, offset, metadata)
-                    .map_err(OwnedPointerError::ContextError)?;
-
+                let base = (&self.0 as *const ArchivedStringRepr).cast::<u8>();
+                let offset = unsafe { self.0.out_of_line_offset() };
+                let address = base.wrapping_offset(offset) as usize;
                 let type_id = TypeId::of::<Self>();
-                if context
-                    .register_shared_ptr(ptr.cast(), type_id)
-                    .map_err(OwnedPointerError::ContextError)?
-                {
-                    context
-                        .bounds_check_subtree_ptr(ptr)
-                        .map_err(OwnedPointerError::ContextError)?;
 
-                    let range = context
-                        .push_prefix_subtree(ptr)
-                        .map_err(OwnedPointerError::ContextError)?;
-                    str::check_bytes(ptr, context)
-                        .map_err(OwnedPointerError::ValueCheckBytesError)?;
-                    context
-                        .pop_prefix_range(range)
-                        .map_err(OwnedPointerError::ContextError)?;
+                match context.start_shared(address, type_id)? {
+                    ValidationState::Started => {
+                        let metadata = self.0.len();
+                        let ptr = rkyv::ptr_meta::from_raw_parts(address as *const _, metadata);
+                        context.in_subtree(ptr, |context| {
+                            // SAFETY: `in_subtree` has guaranteed that `ptr` is
+                            // properly aligned and points to enough bytes to represent
+                            // the pointed-to `str`.
+                            unsafe { str::check_bytes(ptr, context) }
+                        })?;
+
+                        context.finish_shared(address, type_id)?;
+                    }
+                    ValidationState::Pending | ValidationState::Finished => (),
                 }
             }
 
-            Ok(&*value)
+            Ok(())
         }
     }
 };
