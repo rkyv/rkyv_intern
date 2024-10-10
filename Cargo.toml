@@ -7,9 +7,11 @@ edition = "2018"
 
 [dependencies]
 hashbrown = { version = "0.11", optional = true }
-rkyv = "0.7"
+rkyv = { version = "0.8", default-features = false }
 
 [features]
-default = ["std"]
-alloc = ["hashbrown"]
-std = ["alloc"]
+default = ["alloc"]
+alloc = ["hashbrown", "rkyv/alloc"]
+
+[patch.crates-io]
+rkyv = { git = "https://github.com/rkyv/rkyv" }
